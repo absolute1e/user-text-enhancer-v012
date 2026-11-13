@@ -1,4 +1,4 @@
-import { generateRaw } from "../../../../script.js";
+const { generateRaw } = SillyTavern.getContext();
 
 const MODULE = "user_text_enhancer";
 const DEFAULT_PROMPT = `You are a prose enhancement engine. Expand the user's draft into richer, more immersive prose.
