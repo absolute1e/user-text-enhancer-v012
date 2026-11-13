@@ -2,14 +2,17 @@
     white-space: nowrap;
     margin-inline: 4px;
 }
+
 #ute-enhance:disabled {
     opacity: .65;
     cursor: wait;
 }
+
 #ute-settings textarea {
     width: 100%;
     resize: vertical;
 }
+
 #ute-settings .ute-row {
     display: flex;
     align-items: center;
@@ -17,11 +20,13 @@
     gap: 12px;
     margin: 8px 0;
 }
+
 #ute-settings small {
     display: block;
     opacity: .7;
     margin-top: 10px;
 }
+
 .ute-overlay {
     position: fixed;
     inset: 0;
@@ -32,6 +37,7 @@
     justify-content: center;
     padding: 14px;
 }
+
 .ute-dialog {
     background: var(--SmartThemeBlurTintColor, #222);
     color: var(--SmartThemeBodyColor, #eee);
@@ -42,24 +48,33 @@
     max-height: 90vh;
     overflow: auto;
 }
+
 .ute-preview-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
 }
+
 .ute-preview-grid textarea {
     box-sizing: border-box;
     width: 100%;
     min-height: 220px;
     resize: vertical;
 }
+
 .ute-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
     margin-top: 12px;
 }
+
 @media (max-width: 650px) {
-    .ute-preview-grid { grid-template-columns: 1fr; }
-    .ute-preview-grid textarea { min-height: 140px; }
+    .ute-preview-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .ute-preview-grid textarea {
+        min-height: 140px;
+    }
 }

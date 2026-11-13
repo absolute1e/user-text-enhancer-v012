@@ -3,9 +3,9 @@
   "loading_order": 20,
   "js": "index.js",
   "css": "style.css",
-  "author": "User Text Enhancer",
-  "version": "0.1.1",
-  "homePage": "https://github.com/",
+  "author": "absolute1e",
+  "version": "0.1.2",
+  "homePage": "https://github.com/absolute1e/user-text-enhancer-for-ST",
   "auto_update": false,
   "minimum_client_version": "1.19.0"
 }
