@@ -5,7 +5,7 @@
   "css": "style.css",
   "author": "User Text Enhancer",
   "version": "0.2.0",
-  "homePage": "https://github.com/absolute1e/user-text-enhancer-v012",
-  "auto_update": false,
+  "homePage": "https://github.com/absolute1e/user-text-enhancer-v012.git",
+  "auto_update": true,
   "minimum_client_version": "1.19.0"
 }
