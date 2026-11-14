@@ -1,6 +1,12 @@
-# User Text Enhancer 0.3.0
+# User Text Enhancer 0.3.1
 
 A SillyTavern UI extension for expanding and polishing the user's own roleplay draft without taking control of other characters.
+
+## What changed in 0.3.1
+
+- Adds a DeepSeek Thinking override for Enhance requests. On SillyTavern's native DeepSeek connection it temporarily disables `show_thoughts`, which maps to DeepSeek `thinking.type: disabled`. On a detected Custom DeepSeek/LoreBary-compatible endpoint, it temporarily adds `thinking: { type: disabled }` through Custom Include Body and restores the previous setting after generation. The endpoint must support this provider-specific parameter; LoreBary compatibility still needs a live test.
+- Removes explicit `<think>`, `<analysis>`, `<reasoning>`, and related tagged blocks from returned text. It can extract a labeled final draft after a reasoning preamble, remove harmless lead-ins, and rejects obvious visible analysis instead of replacing the composer with it.
+- Adds a setting to turn the provider-level override off. The override is temporary and is not saved into the user's connection settings.
 
 ## What changed in 0.3.0
 
@@ -40,6 +46,8 @@ The manifest keeps `auto_update` disabled to match the existing repository setup
 - **Context sources**: toggles for chat history, character card, persona, active lorebook, and example dialogue. Example dialogue is off by default because card examples can contain the other character's voice and are not necessary for user-side prose.
 - **Preview active context**: shows what was collected before generating.
 - **Second-pass ownership check**: asks the selected model to compare the candidate with the original draft and remove unauthorized additions. This sends a second API request.
+- **Disable DeepSeek Thinking during Enhance**: enabled by default. For native DeepSeek, ST's `show_thoughts` value is temporarily set to false. For a Custom endpoint identified as DeepSeek or LoreBary DeepSeek, a temporary `thinking: { type: disabled }` block is inserted into Custom Include Body. The original setting is restored after both generation passes. Some third-party compatible gateways may ignore or reject DeepSeek-specific fields; this extension cannot guarantee support without a live provider test.
+- **Reasoning output guard**: removes common tagged reasoning blocks and refuses to use an obvious analysis-only response. `generateRaw()` returns message content; the extension cannot access or suppress a provider-private reasoning field unless the provider exposes a documented request parameter.
 - **Show result preview**: compare original and enhanced text before replacing the composer.
 - **Additional prompt guidance / style preferences**: optional preferences subordinate to the hard ownership rules. The core ownership rules are immutable in the code and cannot be removed through the settings text fields.
 

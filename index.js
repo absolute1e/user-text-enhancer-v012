@@ -2,7 +2,7 @@ import { generateRaw } from "../../../../script.js";
 import { getWorldInfoPrompt, getWorldInfoSettings } from "../../../../scripts/world-info.js";
 
 const MODULE = "user_text_enhancer";
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 
 const DEFAULT_PROMPT = `You are a professional prose editor for an ongoing roleplay. Your task is to expand and improve ONLY the text the user has already written.
 
@@ -34,7 +34,7 @@ CONTINUITY AND VOICE
 - Do not contradict established names, appearance, location, relationships, or other known facts. Context is reference material, not permission to invent events.
 
 OUTPUT
-Return only the complete rewritten user draft. No heading, analysis, explanation, quotation wrapper, labels, or commentary.`;
+Do not reveal or print internal reasoning, chain-of-thought, analysis, planning, self-instructions, or explanations. Do not narrate what you are about to do. Perform the rewrite silently and return only the complete rewritten user draft. No heading, analysis, explanation, quotation wrapper, labels, or commentary.`;
 
 const MODE_GUIDANCE = {
     rich: `WRITING MODE: RICH NOVEL PROSE.
@@ -75,6 +75,7 @@ const DEFAULT_SETTINGS = {
     includeLorebook: true,
     includeExamples: false,
     ownershipCheck: true,
+    disableDeepSeekThinking: true,
     showPreview: true,
     extraInstructions: "",
 };
@@ -423,66 +424,211 @@ function protectTemplateTokens(value) {
 
 function cleanModelOutput(value) {
     let result = String(value ?? "").trim();
-    result = result.replace(/^<think(?:ing)?>([\s\S]*?)<\/(?:think|thinking)>\s*/i, "").trim();
+    let reasoningRemoved = false;
+
+    // Remove explicit reasoning blocks commonly emitted by reasoning-capable models.
+    const reasoningBlockPatterns = [
+        /<(think|thinking|analysis|reasoning|reflection|scratchpad)>[\s\S]*?<\/\1>/gi,
+        /<｜begin▁of▁thinking｜>[\s\S]*?<｜end▁of▁thinking｜>/g,
+        /<\|begin_of_thought\|>[\s\S]*?<\|end_of_thought\|>/g,
+    ];
+    for (const pattern of reasoningBlockPatterns) {
+        const cleaned = result.replace(pattern, "\n");
+        if (cleaned !== result) reasoningRemoved = true;
+        result = cleaned;
+    }
+
+    // If a model provides a labeled final section after its analysis, keep only that section.
+    const finalSection = result.match(/(?:^|\n)\s*(?:final(?: answer| draft)?|enhanced draft|rewritten draft|revised draft|final output)\s*[:：]\s*([\s\S]*)$/i);
+    if (finalSection) {
+        result = finalSection[1].trim();
+        reasoningRemoved = true;
+    }
+
+    result = result.trim();
     const fence = result.match(/^```(?:text|markdown)?\s*\n([\s\S]*?)\n```$/i);
     if (fence) result = fence[1].trim();
-    return result;
+
+    // Remove harmless lead-ins, but do not mistake actual reasoning for a lead-in.
+    result = result.replace(/^(?:sure[,!]?|certainly[,!]?|of course[,!]?|here(?:'s| is) (?:the )?(?:enhanced|rewritten|revised) (?:draft|text))\s*[:.!—-]*\s*\n+/i, "").trim();
+    return { text: result, reasoningRemoved };
+}
+
+function isVisibleReasoning(text) {
+    const start = String(text ?? "").trim().slice(0, 700);
+    if (!start) return false;
+    return /^(?:analysis|reasoning|thought process|chain of thought|internal monologue|scratchpad|plan|approach|commentary|notes)\s*[:：-]/i.test(start)
+        || /^(?:okay[,!]?\s+)?(?:let's (?:analy[sz]e|think|rewrite|work through)|let me (?:think(?: through this)?|analy[sz]e|rewrite|expand|enhance)|i(?:'ll| will) (?:rewrite|expand|enhance|polish)\b|first,? I (?:need|should) to|we need to (?:rewrite|preserve|expand|ensure)|we should (?:preserve|keep|avoid|rewrite)|I should (?:preserve|keep|avoid|maintain|ensure)|I need to (?:preserve|keep|avoid|maintain)|the user (?:wants|asked|provided)|the task is to|the request is to|to comply with (?:the )?(?:instructions|request))\b/i.test(start);
+}
+
+function upsertTopLevelYamlBlock(source, key, replacement) {
+    const lines = String(source ?? "").split(/\r?\n/);
+    const keyPattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`);
+    const start = lines.findIndex(line => keyPattern.test(line));
+    const replacementLines = replacement.split("\n");
+
+    if (start < 0) {
+        const base = lines.join("\n").trimEnd();
+        return `${base}${base ? "\n\n" : ""}${replacementLines.join("\n")}\n`;
+    }
+
+    let end = start + 1;
+    while (end < lines.length) {
+        const line = lines[end];
+        if (/^[A-Za-z0-9_.-]+\s*:/.test(line)) break;
+        end++;
+    }
+    lines.splice(start, end - start, ...replacementLines);
+    return `${lines.join("\n").trim()}\n`;
+}
+
+function temporarilyDisableDeepSeekThinking(settings) {
+    if (!settings.disableDeepSeekThinking) {
+        return { applied: false, kind: "none", note: "Provider-level Thinking override is disabled in extension settings.", restore() {} };
+    }
+
+    const cc = getContext().chatCompletionSettings;
+    if (!cc || typeof cc !== "object") {
+        return { applied: false, kind: "none", note: "Could not access Chat Completion settings; output filtering remains active.", restore() {} };
+    }
+
+    const source = String(cc.chat_completion_source ?? "").toLowerCase();
+    if (source === "deepseek") {
+        const hadOwnValue = Object.prototype.hasOwnProperty.call(cc, "show_thoughts");
+        const previous = cc.show_thoughts;
+        cc.show_thoughts = false;
+        return {
+            applied: true,
+            kind: "native",
+            note: "DeepSeek Thinking was disabled temporarily for this Enhance run.",
+            restore() {
+                if (cc.show_thoughts !== false) return;
+                if (hadOwnValue) cc.show_thoughts = previous;
+                else delete cc.show_thoughts;
+            },
+        };
+    }
+
+    if (source === "custom") {
+        const model = String(cc.custom_model ?? cc.model ?? "");
+        const endpoint = String(cc.custom_url ?? cc.custom_endpoint ?? "");
+        const looksLikeDeepSeek = /deepseek|lorebary\.com\/deepseek/i.test(`${model} ${endpoint}`);
+        if (!looksLikeDeepSeek) {
+            return { applied: false, kind: "none", note: "The selected Custom endpoint was not identified as DeepSeek; output filtering remains active.", restore() {} };
+        }
+
+        const previous = String(cc.custom_include_body ?? "");
+        const patched = upsertTopLevelYamlBlock(previous, "thinking", "thinking:\n  type: disabled");
+        cc.custom_include_body = patched;
+        return {
+            applied: true,
+            kind: "custom",
+            note: "A temporary thinking.type: disabled override was added to Custom Include Body. The endpoint must support DeepSeek's Thinking parameter.",
+            restore() {
+                if (cc.custom_include_body === patched) cc.custom_include_body = previous;
+            },
+        };
+    }
+
+    return { applied: false, kind: "none", note: "This API connection has no verified DeepSeek Thinking switch; output filtering remains active.", restore() {} };
+}
+
+function appendWarning(current, message) {
+    return current ? `${current} ${message}` : message;
+}
+
+function isThinkingParameterRejection(error) {
+    const message = String(error?.message ?? error ?? "");
+    return /thinking/i.test(message)
+        && /(?:400|invalid|unsupported|unknown|unrecognized|not allowed|additional propert|extra field)/i.test(message);
 }
 
 async function runGeneration(settings, snapshot, draft) {
     const systemPrompt = buildSystemPrompt(settings, snapshot);
     const responseLength = Number(settings.responseLength);
     const guardedDraft = protectTemplateTokens(draft);
-    const firstPass = await generateRaw({
-        systemPrompt,
-        prompt: buildEnhanceMessages(settings, snapshot, guardedDraft.text, guardedDraft.markers),
-        responseLength,
-        trimNames: false,
-    });
-
-    let enhanced = cleanModelOutput(firstPass);
-    if (!enhanced) throw new Error("The model returned an empty enhancement.");
-
+    let thinkingOverride = temporarilyDisableDeepSeekThinking(settings);
     let auditApplied = false;
     let auditWarning = "";
+    let reasoningBlocksRemoved = false;
+    let enhanced = "";
 
-    if (settings.ownershipCheck) {
+    try {
+        const firstPassArgs = {
+            systemPrompt,
+            prompt: buildEnhanceMessages(settings, snapshot, guardedDraft.text, guardedDraft.markers),
+            responseLength,
+            trimNames: false,
+        };
+        let firstPass;
         try {
-            const auditResult = await generateRaw({
-                systemPrompt: AUDIT_PROMPT,
-                prompt: [{
-                    role: "user",
-                    content: JSON.stringify({
-                        originalDraft: guardedDraft.text,
-                        candidate: enhanced,
-                        referenceData: snapshot.references,
-                        protectedPlaceholders: guardedDraft.markers,
-                    }),
-                }],
-                responseLength,
-                trimNames: false,
-            });
-            const checked = cleanModelOutput(auditResult);
-            if (checked) {
-                enhanced = checked;
-                auditApplied = true;
-            } else {
-                auditWarning = "The ownership check returned an empty result; the first-pass draft is shown.";
-            }
+            firstPass = await generateRaw(firstPassArgs);
         } catch (error) {
-            console.warn("[User Text Enhancer] Ownership check failed; keeping first-pass result.", error);
-            auditWarning = "The second-pass ownership check failed; review the result carefully.";
+            // Some OpenAI-compatible gateways reject DeepSeek's provider-specific `thinking` field.
+            // Retry only when the error explicitly points to that unsupported field, avoiding blind duplicate requests.
+            if (thinkingOverride.kind !== "custom" || !isThinkingParameterRejection(error)) throw error;
+            thinkingOverride.restore();
+            thinkingOverride = {
+                applied: false,
+                kind: "none",
+                note: "The Custom endpoint rejected DeepSeek's Thinking parameter. Retried without the override; output filtering remains active.",
+                restore() {},
+            };
+            firstPass = await generateRaw(firstPassArgs);
         }
+
+        const firstParsed = cleanModelOutput(firstPass);
+        reasoningBlocksRemoved ||= firstParsed.reasoningRemoved;
+        if (!firstParsed.text) throw new Error("The model returned no draft after removing any explicit reasoning blocks.");
+        if (isVisibleReasoning(firstParsed.text)) {
+            throw new Error("The model returned analysis instead of the rewritten draft. Nothing was replaced. Check whether the endpoint supports the DeepSeek Thinking override, then retry.");
+        }
+        enhanced = firstParsed.text;
+
+        if (settings.ownershipCheck) {
+            try {
+                const auditResult = await generateRaw({
+                    systemPrompt: AUDIT_PROMPT,
+                    prompt: [{
+                        role: "user",
+                        content: JSON.stringify({
+                            originalDraft: guardedDraft.text,
+                            candidate: enhanced,
+                            referenceData: snapshot.references,
+                            protectedPlaceholders: guardedDraft.markers,
+                        }),
+                    }],
+                    responseLength,
+                    trimNames: false,
+                });
+                const auditParsed = cleanModelOutput(auditResult);
+                reasoningBlocksRemoved ||= auditParsed.reasoningRemoved;
+                if (auditParsed.text && !isVisibleReasoning(auditParsed.text)) {
+                    enhanced = auditParsed.text;
+                    auditApplied = true;
+                } else if (isVisibleReasoning(auditParsed.text)) {
+                    auditWarning = "The ownership check returned analysis instead of a corrected draft; the first-pass result was kept.";
+                } else {
+                    auditWarning = "The ownership check returned an empty result; the first-pass draft is shown.";
+                }
+            } catch (error) {
+                console.warn("[User Text Enhancer] Ownership check failed; keeping first-pass result.", error);
+                auditWarning = "The second-pass ownership check failed; review the result carefully.";
+            }
+        }
+    } finally {
+        thinkingOverride.restore();
     }
 
     const missingPlaceholders = guardedDraft.missingFrom(enhanced);
     enhanced = guardedDraft.restore(enhanced);
     if (missingPlaceholders.length) {
-        const warning = `The model omitted ${missingPlaceholders.length} protected template placeholder(s). Check the preview carefully.`;
-        auditWarning = auditWarning ? `${auditWarning} ${warning}` : warning;
+        auditWarning = appendWarning(auditWarning, `The model omitted ${missingPlaceholders.length} protected template placeholder(s). Check the preview carefully.`);
     }
-
-    return { enhanced, auditApplied, auditWarning };
+    if (reasoningBlocksRemoved) {
+        auditWarning = appendWarning(auditWarning, "Explicit reasoning blocks were removed from the model output.");
+    }
+    return { enhanced, auditApplied, auditWarning, thinkingNote: thinkingOverride.note, thinkingDisabled: thinkingOverride.applied };
 }
 
 function makeElement(tag, className, text) {
@@ -557,7 +703,7 @@ function showContextPreview(snapshot) {
     openModal("Active context preview", report, [{ label: "Close", onClick: () => $("#ute-generic-modal")?.remove() }]);
 }
 
-function showEnhancementPreview(original, enhanced, textarea, snapshot, auditApplied, auditWarning) {
+function showEnhancementPreview(original, enhanced, textarea, snapshot, auditApplied, auditWarning, thinkingNote = "") {
     $("#ute-preview-modal")?.remove();
 
     const currentContext = getContext();
@@ -570,9 +716,10 @@ function showEnhancementPreview(original, enhanced, textarea, snapshot, auditApp
     const dialog = makeElement("div", "ute-dialog ute-preview-dialog");
     dialog.appendChild(makeElement("h3", "", "Enhanced draft"));
 
-    const statusText = auditWarning
+    const baseStatus = auditWarning
         ? auditWarning
         : auditApplied ? "Second-pass ownership check completed." : "Ownership check was not requested.";
+    const statusText = thinkingNote ? `${baseStatus} ${thinkingNote}` : baseStatus;
     const status = makeElement("p", "ute-status", statusText);
     if (!canReplace) {
         status.textContent += " The chat or input changed while generation was running, so replacing the draft is disabled.";
@@ -689,12 +836,13 @@ async function enhance() {
         if (!result.enhanced) throw new Error("The model returned an empty result.");
 
         if (settings.showPreview || textarea.value !== original || result.auditWarning) {
-            showEnhancementPreview(original, result.enhanced, textarea, snapshot, result.auditApplied, result.auditWarning);
+            showEnhancementPreview(original, result.enhanced, textarea, snapshot, result.auditApplied, result.auditWarning, result.thinkingNote);
         } else {
             textarea.value = result.enhanced;
             textarea.dispatchEvent(new Event("input", { bubbles: true }));
             textarea.dispatchEvent(new Event("change", { bubbles: true }));
             toast("Draft enhanced. It has not been sent.", "success");
+            if (!result.thinkingDisabled) toast(result.thinkingNote, "warning");
         }
 
         const stats = snapshot.stats;
@@ -768,6 +916,8 @@ function buildSettings() {
             <hr>
             <b>Output protection</b>
             <label class="checkbox_label"><input id="ute-audit" type="checkbox"><span>Second-pass ownership check (uses one extra model request)</span></label>
+            <label class="checkbox_label"><input id="ute-thinking-off" type="checkbox"><span>Disable DeepSeek Thinking during Enhance (where supported)</span></label>
+            <small>Temporarily adds DeepSeek's thinking.type: disabled setting to Enhance requests only. For a Custom OpenAI-compatible connection, the endpoint must accept this DeepSeek-specific parameter. Your saved connection settings are restored after generation.</small>
             <label class="checkbox_label"><input id="ute-preview" type="checkbox"><span>Show result preview before replacing draft</span></label>
 
             <hr>
@@ -792,6 +942,7 @@ function buildSettings() {
     bindSetting("ute-lorebook", "includeLorebook");
     bindSetting("ute-examples", "includeExamples");
     bindSetting("ute-audit", "ownershipCheck");
+    bindSetting("ute-thinking-off", "disableDeepSeekThinking");
     bindSetting("ute-preview", "showPreview");
 
     $("#ute-prompt").value = settings.prompt;
