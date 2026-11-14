@@ -21,6 +21,10 @@
     margin: 8px 0;
 }
 
+#ute-settings .ute-row input {
+    max-width: 110px;
+}
+
 #ute-settings small {
     display: block;
     opacity: .7;

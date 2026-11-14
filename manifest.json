@@ -4,8 +4,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "User Text Enhancer",
-  "version": "0.2.0",
-  "homePage": "https://github.com/absolute1e/user-text-enhancer-v012.git",
-  "auto_update": true,
+  "version": "0.2.1",
+  "homePage": "https://github.com/absolute1e/user-text-enhancer-v012",
+  "auto_update": false,
   "minimum_client_version": "1.19.0"
 }
