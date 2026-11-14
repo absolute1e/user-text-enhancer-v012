@@ -1,6 +1,20 @@
-# User Text Enhancer 0.3.2
+# User Text Enhancer 0.3.4
 
 A SillyTavern UI extension for expanding and polishing the user's own roleplay draft without taking control of other characters.
+
+## What changed in 0.3.4
+
+- The LoreBary reasoning command is now sent with **both** requests. In 0.3.2 and 0.3.3 only the rewrite request carried it; the ownership check ran with the proxy's default (full) reasoning, which is slower and a likely source of `503` errors.
+- The LoreBary setting is a dropdown (LOW / MEDIUM / HIGH) instead of free text. LoreBary documents `THINKINGLEVEL` as LOW, MEDIUM, HIGH or MAX. `OFF` exists only for the separate Gemini command, so DeepSeek has no OFF level through LoreBary and LOW is the lowest setting available. Stored values outside the list fall back to LOW.
+- Retry timing: a server-given wait ("Retry-After") is used when the error text contains one, capped at 30 s. SillyTavern normally passes on only the error text, so this applies only in that case. `429` errors use longer default waits than `503`.
+
+## What changed in 0.3.3
+
+- Transient gateway errors (`503 Service Unavailable`, 502, 504, 429, timeouts, network drops) are now retried up to 2 times with a short backoff, for both the rewrite pass and the ownership check. Other errors (bad key, bad request) are not retried.
+- A 1.5 s pause is inserted between the rewrite pass and the ownership check, so the two requests do not hit the proxy back to back.
+- Errors now say which request failed ("First pass (rewrite)" or "Second pass (ownership check)"). If only the ownership check fails, the first-pass draft is still shown with a warning that includes the reason.
+- (Superseded in 0.3.4) An editable LoreBary command field was added here; 0.3.4 replaces it with a dropdown of documented levels.
+- The "Disable Thinking" checkbox is unchanged: it still acts only on SillyTavern's built-in DeepSeek connection and does nothing on a Custom/LoreBary endpoint.
 
 ## What changed in 0.3.2
 
@@ -51,7 +65,7 @@ The manifest keeps `auto_update` disabled. The `homePage` points to `https://git
 - **Preview active context**: shows what was collected before generating.
 - **Second-pass ownership check**: asks the selected model to compare the candidate with the original draft and remove unauthorized additions. This sends a second API request.
 - **Disable Thinking on SillyTavern's native DeepSeek connection only**: temporarily changes `show_thoughts` for SillyTavern's built-in DeepSeek source. It does not alter a Custom endpoint's request body.
-- **Request LOW reasoning effort on LoreBary DeepSeek**: prepends LoreBary's documented `<THINKINGLEVEL=LOW>` command to the first system message only when the Custom URL matches `api.lorebary.com/deepseek`. This is an effort request, not a guaranteed reasoning-off control. It can be switched off.
+- **LoreBary reasoning level (LOW / MEDIUM / HIGH)**: prepends the documented `<THINKINGLEVEL=...>` command to the first system message of each request, only when the Custom URL matches `api.lorebary.com/deepseek`. This is an effort request, not a reasoning-off control. It can be switched off.
 - **Show result preview**: compare original and enhanced text before replacing the composer.
 - **Additional prompt guidance / style preferences**: optional preferences subordinate to the hard ownership rules. The core ownership rules are immutable in the code.
 

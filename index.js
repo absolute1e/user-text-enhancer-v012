@@ -3,7 +3,7 @@ import { extractReasoningFromData } from "../../../../scripts/reasoning.js";
 import { getWorldInfoPrompt, getWorldInfoSettings } from "../../../../scripts/world-info.js";
 
 const MODULE = "user_text_enhancer";
-const VERSION = "0.3.2";
+const VERSION = "0.3.4";
 
 const DEFAULT_PROMPT = `You are a professional prose editor for an ongoing roleplay. Your task is to expand and improve ONLY the text the user has already written.
 
@@ -80,6 +80,9 @@ const DEFAULT_SETTINGS = {
     disableDeepSeekThinking: false,
     // LoreBary documents this command for supported OpenAI-compatible routes.
     useLoreBaryLowThinking: true,
+    // LoreBary documents THINKINGLEVEL = LOW | MEDIUM | HIGH | MAX (MAX is mapped to HIGH on OpenAI-compatible routes).
+    // OFF exists only for the separate GEMINITHINKING command, so it is not offered here.
+    lorebaryLevel: "LOW",
     showPreview: true,
     extraInstructions: "",
 };
@@ -111,6 +114,7 @@ function getSettings() {
     settings.responseLength = clamp(Number(settings.responseLength) || DEFAULT_SETTINGS.responseLength, 128, 6000);
     settings.historyMessages = clamp(Number(settings.historyMessages) || DEFAULT_SETTINGS.historyMessages, 1, 40);
     if (!MODE_GUIDANCE[settings.mode]) settings.mode = DEFAULT_SETTINGS.mode;
+    settings.lorebaryLevel = sanitizeLorebaryLevel(settings.lorebaryLevel);
 
     return settings;
 }
@@ -351,14 +355,63 @@ function isLoreBaryDeepSeekEndpoint() {
     return source === "custom" && /lorebary\.com\/deepseek(?:[/?#]|$)/i.test(endpoint);
 }
 
+const LOREBARY_LEVELS = ["LOW", "MEDIUM", "HIGH"];
+
+function sanitizeLorebaryLevel(value) {
+    const level = String(value ?? "").trim().toUpperCase();
+    return LOREBARY_LEVELS.includes(level) ? level : "LOW";
+}
+
+function getProviderDirective(settings) {
+    if (!settings.useLoreBaryLowThinking || !isLoreBaryDeepSeekEndpoint()) return "";
+    return `<THINKINGLEVEL=${sanitizeLorebaryLevel(settings.lorebaryLevel)}>`;
+}
+
+// 503 / 502 / 504 / 429 and network blips are usually transient on proxy gateways.
+const TRANSIENT_ERROR_PATTERN = /\b(?:50[234]|429|408)\b|service unavailable|bad gateway|gateway time-?out|temporarily unavailable|overloaded|rate.?limit|too many requests|timed? ?out|network ?error|failed to fetch|econnreset|socket hang up/i;
+const GENERATION_RETRIES = 2;
+const PASS_GAP_MS = 1500;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// SillyTavern usually passes on only the error text, not the response headers, so a server-provided
+// wait time can be used only when the text itself contains one ("retry after 12 seconds", "Retry-After: 12").
+function retryDelayFromMessage(message, attempt) {
+    const hinted = /retry[- ]?after\D{0,12}(\d{1,3})/i.exec(message);
+    if (hinted) return clamp(Number(hinted[1]) * 1000, 1000, 30000);
+    const base = /\b429\b|too many requests|rate.?limit/i.test(message) ? 5000 : 2000;
+    return base * attempt + Math.floor(Math.random() * 500);
+}
+
+async function generateWithRetry(label, args) {
+    let attempt = 0;
+    for (;;) {
+        try {
+            return await generateRawData(args);
+        } catch (error) {
+            const message = String(error?.message ?? error ?? "").trim() || "request failed";
+            if (!TRANSIENT_ERROR_PATTERN.test(message) || attempt >= GENERATION_RETRIES) {
+                const wrapped = new Error(`${label}: ${message}${attempt ? ` (after ${attempt + 1} attempts)` : ""}`);
+                wrapped.cause = error;
+                throw wrapped;
+            }
+            attempt += 1;
+            const delay = retryDelayFromMessage(message, attempt);
+            console.warn(`[User Text Enhancer] ${label} hit a transient error ("${message}"); retry ${attempt}/${GENERATION_RETRIES} in ${delay} ms.`);
+            await sleep(delay);
+        }
+    }
+}
+
 function buildSystemPrompt(settings, snapshot) {
     const extra = safeString(settings.extraInstructions);
     const customPrompt = safeString(settings.prompt);
     // LoreBary parses server commands only from the first system message.
-    // The tag requests LOW effort; it does not claim to disable reasoning.
-    const providerDirective = settings.useLoreBaryLowThinking && isLoreBaryDeepSeekEndpoint()
-        ? "<THINKINGLEVEL=LOW>\n\n"
-        : "";
+    // The command requests a reasoning level; it does not claim to disable reasoning.
+    const command = getProviderDirective(settings);
+    const providerDirective = command ? `${command}\n\n` : "";
 
     return `${providerDirective}${DEFAULT_PROMPT}
 
@@ -587,6 +640,7 @@ async function runGeneration(settings, snapshot, draft) {
     const responseLength = Number(settings.responseLength);
     const guardedDraft = protectTemplateTokens(draft);
     const thinkingOverride = temporarilyDisableNativeDeepSeekThinking(settings);
+    const providerCommand = getProviderDirective(settings);
     let auditApplied = false;
     let auditWarning = "";
     let reasoningBlocksRemoved = false;
@@ -599,7 +653,7 @@ async function runGeneration(settings, snapshot, draft) {
             prompt: buildEnhanceMessages(settings, snapshot, guardedDraft.text, guardedDraft.markers),
             responseLength,
         };
-        const firstRaw = await generateRawData(firstPassArgs);
+        const firstRaw = await generateWithRetry("First pass (rewrite)", firstPassArgs);
         const firstOutput = extractRawModelText(firstRaw);
         separateReasoningExcluded ||= firstOutput.reasoning.present;
 
@@ -618,8 +672,9 @@ async function runGeneration(settings, snapshot, draft) {
 
         if (settings.ownershipCheck) {
             try {
-                const auditRaw = await generateRawData({
-                    systemPrompt: AUDIT_PROMPT,
+                await sleep(PASS_GAP_MS);
+                const auditRaw = await generateWithRetry("Second pass (ownership check)", {
+                    systemPrompt: `${providerCommand ? `${providerCommand}\n\n` : ""}${AUDIT_PROMPT}`,
                     prompt: [{
                         role: "user",
                         content: JSON.stringify({
@@ -645,7 +700,7 @@ async function runGeneration(settings, snapshot, draft) {
                 }
             } catch (error) {
                 console.warn("[User Text Enhancer] Ownership check failed; keeping first-pass result.", error);
-                auditWarning = "The second-pass ownership check failed; review the result carefully.";
+                auditWarning = `The second-pass ownership check failed (${error?.message || error}); the first-pass result is shown, so review it carefully.`;
             }
         }
     } finally {
@@ -664,8 +719,8 @@ async function runGeneration(settings, snapshot, draft) {
         auditWarning = appendWarning(auditWarning, "A separate provider reasoning field was detected and excluded from the draft.");
     }
 
-    const providerNote = settings.useLoreBaryLowThinking && isLoreBaryDeepSeekEndpoint()
-        ? "LoreBary's documented LOW reasoning-effort command was added to the first system message. It requests lower effort; it does not guarantee that thinking is fully disabled."
+    const providerNote = providerCommand
+        ? `LoreBary command ${providerCommand} was added to the system message of each request. It lowers reasoning effort; LoreBary has no OFF level for DeepSeek.`
         : thinkingOverride.note;
 
     return {
@@ -964,8 +1019,16 @@ function buildSettings() {
             <label class="checkbox_label"><input id="ute-audit" type="checkbox"><span>Second-pass ownership check (uses one extra model request)</span></label>
             <label class="checkbox_label"><input id="ute-thinking-off" type="checkbox"><span>Disable Thinking on SillyTavern's native DeepSeek connection only</span></label>
             <small>This uses SillyTavern's built-in DeepSeek switch. It does not inject guessed parameters into Custom endpoints.</small>
-            <label class="checkbox_label"><input id="ute-lorebary-low" type="checkbox"><span>Request LOW reasoning effort on LoreBary DeepSeek</span></label>
-            <small>Automatically applies only to a Custom endpoint matching api.lorebary.com/deepseek. LoreBary documents THINKINGLEVEL=LOW for supported routes; this requests lower effort but does not guarantee reasoning is fully disabled.</small>
+            <label class="checkbox_label"><input id="ute-lorebary-low" type="checkbox"><span>Send a LoreBary reasoning-level command on LoreBary DeepSeek</span></label>
+            <div class="ute-row">
+                <label for="ute-lorebary-level">LoreBary reasoning level</label>
+                <select id="ute-lorebary-level" class="text_pole">
+                    <option value="LOW">LOW (lowest available)</option>
+                    <option value="MEDIUM">MEDIUM</option>
+                    <option value="HIGH">HIGH</option>
+                </select>
+            </div>
+            <small>Applies only to a Custom endpoint matching api.lorebary.com/deepseek. The command &lt;THINKINGLEVEL=...&gt; is added to the system message of both requests (rewrite and ownership check). LoreBary documents LOW, MEDIUM, HIGH and MAX for it; there is no OFF level for DeepSeek, so LOW is the lowest setting this extension can request.</small>
             <small>Response protection reads SillyTavern's raw API result, uses message content only, and excludes a separately returned reasoning field. Recognizable analysis-only text inside message content is rejected.</small>
             <label class="checkbox_label"><input id="ute-preview" type="checkbox"><span>Show result preview before replacing draft</span></label>
 
@@ -993,6 +1056,7 @@ function buildSettings() {
     bindSetting("ute-audit", "ownershipCheck");
     bindSetting("ute-thinking-off", "disableDeepSeekThinking");
     bindSetting("ute-lorebary-low", "useLoreBaryLowThinking");
+    bindSetting("ute-lorebary-level", "lorebaryLevel", sanitizeLorebaryLevel);
     bindSetting("ute-preview", "showPreview");
 
     $("#ute-prompt").value = settings.prompt;
