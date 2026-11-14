@@ -1,8 +1,9 @@
-import { generateRaw } from "../../../../script.js";
+import { cleanUpMessage, extractMessageFromData, generateRawData } from "../../../../script.js";
+import { extractReasoningFromData } from "../../../../scripts/reasoning.js";
 import { getWorldInfoPrompt, getWorldInfoSettings } from "../../../../scripts/world-info.js";
 
 const MODULE = "user_text_enhancer";
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 
 const DEFAULT_PROMPT = `You are a professional prose editor for an ongoing roleplay. Your task is to expand and improve ONLY the text the user has already written.
 
@@ -75,7 +76,10 @@ const DEFAULT_SETTINGS = {
     includeLorebook: true,
     includeExamples: false,
     ownershipCheck: true,
-    disableDeepSeekThinking: true,
+    // Native DeepSeek only. Custom endpoints must not receive guessed provider fields.
+    disableDeepSeekThinking: false,
+    // LoreBary documents this command for supported OpenAI-compatible routes.
+    useLoreBaryLowThinking: true,
     showPreview: true,
     extraInstructions: "",
 };
@@ -340,11 +344,23 @@ async function buildContextSnapshot(settings) {
     };
 }
 
+function isLoreBaryDeepSeekEndpoint() {
+    const cc = getContext().chatCompletionSettings ?? {};
+    const source = String(cc.chat_completion_source ?? "").toLowerCase();
+    const endpoint = String(cc.custom_url ?? cc.custom_endpoint ?? "");
+    return source === "custom" && /lorebary\.com\/deepseek(?:[/?#]|$)/i.test(endpoint);
+}
+
 function buildSystemPrompt(settings, snapshot) {
     const extra = safeString(settings.extraInstructions);
     const customPrompt = safeString(settings.prompt);
+    // LoreBary parses server commands only from the first system message.
+    // The tag requests LOW effort; it does not claim to disable reasoning.
+    const providerDirective = settings.useLoreBaryLowThinking && isLoreBaryDeepSeekEndpoint()
+        ? "<THINKINGLEVEL=LOW>\n\n"
+        : "";
 
-    return `${DEFAULT_PROMPT}
+    return `${providerDirective}${DEFAULT_PROMPT}
 
 ${MODE_GUIDANCE[settings.mode]}
 
@@ -438,8 +454,14 @@ function cleanModelOutput(value) {
         result = cleaned;
     }
 
+    // A tagged final answer is output, not reasoning: unwrap it rather than deleting it.
+    const taggedFinal = result.match(/<(final(?:_answer|_draft)?)>([\s\S]*?)<\/\1>/i);
+    if (taggedFinal) {
+        result = taggedFinal[2].trim();
+    }
+
     // If a model provides a labeled final section after its analysis, keep only that section.
-    const finalSection = result.match(/(?:^|\n)\s*(?:final(?: answer| draft)?|enhanced draft|rewritten draft|revised draft|final output)\s*[:：]\s*([\s\S]*)$/i);
+    const finalSection = result.match(/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?(?:final(?: answer| draft| output)?|enhanced draft|rewritten draft|revised draft|result|готовый вариант|улучшенный текст|переработанный текст|итоговый вариант|ответ)\*{0,2}\s*[:：]\*{0,2}\s*([\s\S]*)$/i);
     if (finalSection) {
         result = finalSection[1].trim();
         reasoningRemoved = true;
@@ -455,102 +477,120 @@ function cleanModelOutput(value) {
 }
 
 function isVisibleReasoning(text) {
-    const start = String(text ?? "").trim().slice(0, 700);
+    const start = String(text ?? "").trim().slice(0, 1000);
     if (!start) return false;
-    return /^(?:analysis|reasoning|thought process|chain of thought|internal monologue|scratchpad|plan|approach|commentary|notes)\s*[:：-]/i.test(start)
-        || /^(?:okay[,!]?\s+)?(?:let's (?:analy[sz]e|think|rewrite|work through)|let me (?:think(?: through this)?|analy[sz]e|rewrite|expand|enhance)|i(?:'ll| will) (?:rewrite|expand|enhance|polish)\b|first,? I (?:need|should) to|we need to (?:rewrite|preserve|expand|ensure)|we should (?:preserve|keep|avoid|rewrite)|I should (?:preserve|keep|avoid|maintain|ensure)|I need to (?:preserve|keep|avoid|maintain)|the user (?:wants|asked|provided)|the task is to|the request is to|to comply with (?:the )?(?:instructions|request))\b/i.test(start);
+
+    const explicitMetaLabels = /^(?:analysis|reasoning|thought process|chain of thought|internal monologue|scratchpad|plan|approach|commentary|notes|рассуждения|анализ|план|мысли модели|внутренний анализ)\s*[:：-]/i;
+    const explicitReasoningTag = /^<(?:think|thinking|analysis|reasoning|reflection|scratchpad)\b/i;
+    const englishPlanning = /^(?:(?:okay|alright|well|now)[,!.]?\s+(?:so\s+)?)?(?:let's (?:analy[sz]e|think|rewrite|work through|craft|produce|make sure|ensure|preserve|keep)|let me (?:think(?: through this)?|analy[sz]e|rewrite|expand|enhance|craft)|i(?:'ll| will) (?:rewrite|expand|enhance|polish|craft|produce)\b|first,? i (?:need|should) to|we (?:(?:need|should|must) to|have to) (?:rewrite|preserve|expand|ensure|maintain|avoid adding|return|produce|create)|i (?:need|should|must) to (?:rewrite|preserve|expand|ensure|maintain|avoid adding|return|produce|create)|the user (?:wants|asked|provided)|the task is to|the request is to|to comply with (?:the )?(?:instructions|request)|we need to follow|we should follow|let's follow (?:the )?(?:instructions|rules))\b/i;
+    const russianPlanning = /^(?:пользователь (?:просит|хочет|предоставил)|задача (?:заключается|состоит) в|согласно инструкц|для выполнения (?:задачи|запроса)|сначала (?:нужно|я должен|я должна)|нам нужно (?:сохранить|переписать|расширить|следовать)|необходимо (?:сохранить|переписать|расширить|соблюсти)|я должен (?:сохранить|переписать|расширить|соблюсти)|я должна (?:сохранить|переписать|расширить|соблюсти)|давайте (?:сначала )?(?:разбер[её]м|проанализируем|перепишем)|нужно (?:переписать|расширить|сохранить|соблюдать)|следует (?:переписать|сохранить|соблюдать)|надо (?:переписать|сохранить|соблюдать))(?=\s|[:：,.;!?-]|$)/i;
+    const chinesePlanning = /^(?:分析[:：]|思考过程|用户(?:的)?(?:要求|希望|提供)|任务是|首先需要|我们需要(?:遵循|保留|改写)|我(?:需要|应该|必须).{0,20}(?:遵循|保留|改写|生成|扩展|满足)|让我们(?:分析|思考|改写))/u;
+
+    return explicitMetaLabels.test(start) || explicitReasoningTag.test(start) || englishPlanning.test(start) || russianPlanning.test(start) || chinesePlanning.test(start);
 }
 
-function upsertTopLevelYamlBlock(source, key, replacement) {
-    const lines = String(source ?? "").split(/\r?\n/);
-    const keyPattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`);
-    const start = lines.findIndex(line => keyPattern.test(line));
-    const replacementLines = replacement.split("\n");
-
-    if (start < 0) {
-        const base = lines.join("\n").trimEnd();
-        return `${base}${base ? "\n\n" : ""}${replacementLines.join("\n")}\n`;
-    }
-
-    let end = start + 1;
-    while (end < lines.length) {
-        const line = lines[end];
-        if (/^[A-Za-z0-9_.-]+\s*:/.test(line)) break;
-        end++;
-    }
-    lines.splice(start, end - start, ...replacementLines);
-    return `${lines.join("\n").trim()}\n`;
-}
-
-function temporarilyDisableDeepSeekThinking(settings) {
+function temporarilyDisableNativeDeepSeekThinking(settings) {
     if (!settings.disableDeepSeekThinking) {
-        return { applied: false, kind: "none", note: "Provider-level Thinking override is disabled in extension settings.", restore() {} };
+        return { applied: false, note: "Native DeepSeek Thinking override is off; response extraction and output protection remain active.", restore() {} };
     }
 
     const cc = getContext().chatCompletionSettings;
     if (!cc || typeof cc !== "object") {
-        return { applied: false, kind: "none", note: "Could not access Chat Completion settings; output filtering remains active.", restore() {} };
+        return { applied: false, note: "Could not access Chat Completion settings; response extraction and output protection remain active.", restore() {} };
     }
 
     const source = String(cc.chat_completion_source ?? "").toLowerCase();
-    if (source === "deepseek") {
-        const hadOwnValue = Object.prototype.hasOwnProperty.call(cc, "show_thoughts");
-        const previous = cc.show_thoughts;
-        cc.show_thoughts = false;
-        return {
-            applied: true,
-            kind: "native",
-            note: "DeepSeek Thinking was disabled temporarily for this Enhance run.",
-            restore() {
-                if (cc.show_thoughts !== false) return;
-                if (hadOwnValue) cc.show_thoughts = previous;
-                else delete cc.show_thoughts;
-            },
-        };
+    if (source !== "deepseek") {
+        return { applied: false, note: "No provider-specific Thinking parameter was sent to this Custom endpoint.", restore() {} };
     }
 
-    if (source === "custom") {
-        const model = String(cc.custom_model ?? cc.model ?? "");
-        const endpoint = String(cc.custom_url ?? cc.custom_endpoint ?? "");
-        const looksLikeDeepSeek = /deepseek|lorebary\.com\/deepseek/i.test(`${model} ${endpoint}`);
-        if (!looksLikeDeepSeek) {
-            return { applied: false, kind: "none", note: "The selected Custom endpoint was not identified as DeepSeek; output filtering remains active.", restore() {} };
-        }
+    const hadOwnValue = Object.prototype.hasOwnProperty.call(cc, "show_thoughts");
+    const previous = cc.show_thoughts;
+    cc.show_thoughts = false;
+    return {
+        applied: true,
+        note: "SillyTavern's native DeepSeek connection was asked to disable Thinking for this Enhance run.",
+        restore() {
+            if (cc.show_thoughts !== false) return;
+            if (hadOwnValue) cc.show_thoughts = previous;
+            else delete cc.show_thoughts;
+        },
+    };
+}
 
-        const previous = String(cc.custom_include_body ?? "");
-        const patched = upsertTopLevelYamlBlock(previous, "thinking", "thinking:\n  type: disabled");
-        cc.custom_include_body = patched;
-        return {
-            applied: true,
-            kind: "custom",
-            note: "A temporary thinking.type: disabled override was added to Custom Include Body. The endpoint must support DeepSeek's Thinking parameter.",
-            restore() {
-                if (cc.custom_include_body === patched) cc.custom_include_body = previous;
-            },
-        };
+function getRawReasoningMetadata(raw) {
+    const context = getContext();
+    const cc = context.chatCompletionSettings ?? {};
+    let standardReasoning = "";
+    try {
+        // Use SillyTavern's own provider-aware parser, but ignore the UI visibility toggle.
+        standardReasoning = extractReasoningFromData(raw, {
+            mainApi: context.mainApi,
+            chatCompletionSource: cc.chat_completion_source,
+            ignoreShowThoughts: true,
+        });
+    } catch (error) {
+        console.debug("[User Text Enhancer] SillyTavern reasoning extraction was unavailable; using raw-field fallbacks.", error);
     }
 
-    return { applied: false, kind: "none", note: "This API connection has no verified DeepSeek Thinking switch; output filtering remains active.", restore() {} };
+    const message = raw?.choices?.[0]?.message ?? raw?.message ?? {};
+    const candidates = [
+        standardReasoning,
+        message.reasoning_content,
+        message.reasoning,
+        message.analysis,
+        raw?.choices?.[0]?.reasoning_content,
+        raw?.reasoning_content,
+        raw?.reasoning,
+    ];
+    const parts = [...new Set(candidates
+        .filter(value => typeof value === "string" && value.trim())
+        .map(value => value.trim()))];
+    return { present: parts.length > 0, characters: parts.reduce((sum, value) => sum + value.length, 0) };
+}
+
+function extractRawModelText(raw) {
+    let extracted = "";
+    try {
+        extracted = extractMessageFromData(raw, getContext().mainApi);
+    } catch (error) {
+        console.warn("[User Text Enhancer] SillyTavern could not extract message content from raw API data.", error);
+    }
+
+    // Keep a conservative fallback for common OpenAI-compatible proxy wrappers.
+    if (typeof extracted !== "string" || !extracted.trim()) {
+        const message = raw?.choices?.[0]?.message ?? raw?.message ?? {};
+        const candidate = message.content ?? raw?.choices?.[0]?.text ?? raw?.text;
+        if (typeof candidate === "string") extracted = candidate;
+        else if (Array.isArray(candidate)) extracted = candidate.map(part => typeof part === "string" ? part : (part?.text ?? "")).join("");
+    }
+
+    const formatted = cleanUpMessage({
+        getMessage: typeof extracted === "string" ? extracted : "",
+        isImpersonate: false,
+        isContinue: false,
+        displayIncompleteSentences: true,
+        includeUserPromptBias: false,
+        trimNames: false,
+        trimWrongNames: false,
+    });
+
+    return { text: safeString(formatted), reasoning: getRawReasoningMetadata(raw) };
 }
 
 function appendWarning(current, message) {
     return current ? `${current} ${message}` : message;
 }
 
-function isThinkingParameterRejection(error) {
-    const message = String(error?.message ?? error ?? "");
-    return /thinking/i.test(message)
-        && /(?:400|invalid|unsupported|unknown|unrecognized|not allowed|additional propert|extra field)/i.test(message);
-}
-
 async function runGeneration(settings, snapshot, draft) {
     const systemPrompt = buildSystemPrompt(settings, snapshot);
     const responseLength = Number(settings.responseLength);
     const guardedDraft = protectTemplateTokens(draft);
-    let thinkingOverride = temporarilyDisableDeepSeekThinking(settings);
+    const thinkingOverride = temporarilyDisableNativeDeepSeekThinking(settings);
     let auditApplied = false;
     let auditWarning = "";
     let reasoningBlocksRemoved = false;
+    let separateReasoningExcluded = false;
     let enhanced = "";
 
     try {
@@ -558,36 +598,27 @@ async function runGeneration(settings, snapshot, draft) {
             systemPrompt,
             prompt: buildEnhanceMessages(settings, snapshot, guardedDraft.text, guardedDraft.markers),
             responseLength,
-            trimNames: false,
         };
-        let firstPass;
-        try {
-            firstPass = await generateRaw(firstPassArgs);
-        } catch (error) {
-            // Some OpenAI-compatible gateways reject DeepSeek's provider-specific `thinking` field.
-            // Retry only when the error explicitly points to that unsupported field, avoiding blind duplicate requests.
-            if (thinkingOverride.kind !== "custom" || !isThinkingParameterRejection(error)) throw error;
-            thinkingOverride.restore();
-            thinkingOverride = {
-                applied: false,
-                kind: "none",
-                note: "The Custom endpoint rejected DeepSeek's Thinking parameter. Retried without the override; output filtering remains active.",
-                restore() {},
-            };
-            firstPass = await generateRaw(firstPassArgs);
-        }
+        const firstRaw = await generateRawData(firstPassArgs);
+        const firstOutput = extractRawModelText(firstRaw);
+        separateReasoningExcluded ||= firstOutput.reasoning.present;
 
-        const firstParsed = cleanModelOutput(firstPass);
+        const firstParsed = cleanModelOutput(firstOutput.text);
         reasoningBlocksRemoved ||= firstParsed.reasoningRemoved;
-        if (!firstParsed.text) throw new Error("The model returned no draft after removing any explicit reasoning blocks.");
+        if (!firstParsed.text) {
+            if (firstOutput.reasoning.present) {
+                throw new Error("The provider returned a separate reasoning field but no user-facing draft. Nothing was placed in the preview.");
+            }
+            throw new Error("The model returned no draft. Nothing was placed in the preview.");
+        }
         if (isVisibleReasoning(firstParsed.text)) {
-            throw new Error("The model returned analysis instead of the rewritten draft. Nothing was replaced. Check whether the endpoint supports the DeepSeek Thinking override, then retry.");
+            throw new Error("The provider placed analysis in the message content instead of returning a rewritten draft. Nothing was placed in the preview. LoreBary's LOW effort request may reduce this, but cannot guarantee that reasoning is disabled.");
         }
         enhanced = firstParsed.text;
 
         if (settings.ownershipCheck) {
             try {
-                const auditResult = await generateRaw({
+                const auditRaw = await generateRawData({
                     systemPrompt: AUDIT_PROMPT,
                     prompt: [{
                         role: "user",
@@ -599,15 +630,16 @@ async function runGeneration(settings, snapshot, draft) {
                         }),
                     }],
                     responseLength,
-                    trimNames: false,
                 });
-                const auditParsed = cleanModelOutput(auditResult);
+                const auditOutput = extractRawModelText(auditRaw);
+                separateReasoningExcluded ||= auditOutput.reasoning.present;
+                const auditParsed = cleanModelOutput(auditOutput.text);
                 reasoningBlocksRemoved ||= auditParsed.reasoningRemoved;
                 if (auditParsed.text && !isVisibleReasoning(auditParsed.text)) {
                     enhanced = auditParsed.text;
                     auditApplied = true;
                 } else if (isVisibleReasoning(auditParsed.text)) {
-                    auditWarning = "The ownership check returned analysis instead of a corrected draft; the first-pass result was kept.";
+                    auditWarning = "The ownership check returned analysis in message content; it was discarded and the first-pass result was kept.";
                 } else {
                     auditWarning = "The ownership check returned an empty result; the first-pass draft is shown.";
                 }
@@ -626,9 +658,23 @@ async function runGeneration(settings, snapshot, draft) {
         auditWarning = appendWarning(auditWarning, `The model omitted ${missingPlaceholders.length} protected template placeholder(s). Check the preview carefully.`);
     }
     if (reasoningBlocksRemoved) {
-        auditWarning = appendWarning(auditWarning, "Explicit reasoning blocks were removed from the model output.");
+        auditWarning = appendWarning(auditWarning, "Reasoning markup or a labeled analysis preamble was removed from the message content.");
     }
-    return { enhanced, auditApplied, auditWarning, thinkingNote: thinkingOverride.note, thinkingDisabled: thinkingOverride.applied };
+    if (separateReasoningExcluded) {
+        auditWarning = appendWarning(auditWarning, "A separate provider reasoning field was detected and excluded from the draft.");
+    }
+
+    const providerNote = settings.useLoreBaryLowThinking && isLoreBaryDeepSeekEndpoint()
+        ? "LoreBary's documented LOW reasoning-effort command was added to the first system message. It requests lower effort; it does not guarantee that thinking is fully disabled."
+        : thinkingOverride.note;
+
+    return {
+        enhanced,
+        auditApplied,
+        auditWarning,
+        thinkingNote: providerNote,
+        thinkingDisabled: thinkingOverride.applied,
+    };
 }
 
 function makeElement(tag, className, text) {
@@ -916,8 +962,11 @@ function buildSettings() {
             <hr>
             <b>Output protection</b>
             <label class="checkbox_label"><input id="ute-audit" type="checkbox"><span>Second-pass ownership check (uses one extra model request)</span></label>
-            <label class="checkbox_label"><input id="ute-thinking-off" type="checkbox"><span>Disable DeepSeek Thinking during Enhance (where supported)</span></label>
-            <small>Temporarily adds DeepSeek's thinking.type: disabled setting to Enhance requests only. For a Custom OpenAI-compatible connection, the endpoint must accept this DeepSeek-specific parameter. Your saved connection settings are restored after generation.</small>
+            <label class="checkbox_label"><input id="ute-thinking-off" type="checkbox"><span>Disable Thinking on SillyTavern's native DeepSeek connection only</span></label>
+            <small>This uses SillyTavern's built-in DeepSeek switch. It does not inject guessed parameters into Custom endpoints.</small>
+            <label class="checkbox_label"><input id="ute-lorebary-low" type="checkbox"><span>Request LOW reasoning effort on LoreBary DeepSeek</span></label>
+            <small>Automatically applies only to a Custom endpoint matching api.lorebary.com/deepseek. LoreBary documents THINKINGLEVEL=LOW for supported routes; this requests lower effort but does not guarantee reasoning is fully disabled.</small>
+            <small>Response protection reads SillyTavern's raw API result, uses message content only, and excludes a separately returned reasoning field. Recognizable analysis-only text inside message content is rejected.</small>
             <label class="checkbox_label"><input id="ute-preview" type="checkbox"><span>Show result preview before replacing draft</span></label>
 
             <hr>
@@ -943,6 +992,7 @@ function buildSettings() {
     bindSetting("ute-examples", "includeExamples");
     bindSetting("ute-audit", "ownershipCheck");
     bindSetting("ute-thinking-off", "disableDeepSeekThinking");
+    bindSetting("ute-lorebary-low", "useLoreBaryLowThinking");
     bindSetting("ute-preview", "showPreview");
 
     $("#ute-prompt").value = settings.prompt;
