@@ -25,6 +25,7 @@
     display: block;
     opacity: .7;
     margin-top: 10px;
+    line-height: 1.45;
 }
 
 .ute-overlay {
@@ -70,11 +71,6 @@
 }
 
 @media (max-width: 650px) {
-    .ute-preview-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .ute-preview-grid textarea {
-        min-height: 140px;
-    }
+    .ute-preview-grid { grid-template-columns: 1fr; }
+    .ute-preview-grid textarea { min-height: 140px; }
 }

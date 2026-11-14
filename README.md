@@ -1,34 +1,26 @@
-# User Text Enhancer
+# User Text Enhancer for SillyTavern
 
-A SillyTavern UI extension that expands and polishes the text currently in the user's message box before it is sent.
+A draft enhancer for SillyTavern 1.19.0+. It rewrites the text in the message input and shows a preview before replacing it. It never sends the message automatically.
 
-## Features
+## Context-aware mode
 
-- Adds a **✦ Enhance** button beside the message composer.
-- Uses the currently selected SillyTavern API/model through `generateRaw()`.
-- Sends a standalone raw prompt containing the enhancement instruction and the user's draft; it does not deliberately include chat history or character-card context.
-- Shows an original/enhanced preview before replacing the draft (enabled by default).
-- Never sends the message automatically.
-- Lets you customize the enhancement prompt and response token limit.
-- Protects edits made to the message box while generation is running: an older result will not overwrite a newer draft.
+When **Use active chat context** is enabled, the extension uses SillyTavern's `generateQuietPrompt()` instead of raw generation. The request is built inside the active chat and can therefore use the same configured character card, persona, chat history, World Info/lorebook entries, Author's Note, and prompt-manager context that are active for the current chat.
 
-## Install
+The extension appends a draft-enhancement instruction as a quiet prompt. The draft is not inserted into the chat and is not saved to history. `responseLength` is applied only to that quiet generation request and restored by SillyTavern afterward.
 
-In SillyTavern, open **Extensions → Install Extension**, paste this repository URL, and install:
+The default prompt is designed to expand the user's side of the roleplay only. It explicitly prohibits writing new actions, dialogue, reactions, thoughts, or decisions for AI-controlled characters. It allows elaboration of another character's action only when the user's draft already states that action.
+
+## Settings
+
+- **Enhancement prompt** — editable instruction used for the rewrite.
+- **Response length** — maximum response length for the enhancement request.
+- **Use active chat context** — on: use quiet generation in the current chat; off: use the legacy raw-generation path with only the draft and prompt.
+- **Show result preview** — preview the original and enhanced text before replacing the draft.
+
+## Install / update
+
+Install this repository through SillyTavern's **Extensions → Install Extension** using the Git URL:
 
 `https://github.com/absolute1e/user-text-enhancer-for-ST`
 
-Reload SillyTavern if the extension does not appear immediately.
-
-## Usage
-
-1. Write your roleplay message in the normal message box.
-2. Press **✦ Enhance**.
-3. Review the result and choose **Replace draft** or **Cancel**.
-4. Send the message yourself when ready.
-
-Settings are available under the **User Text Enhancer** section in Extensions.
-
-## Compatibility
-
-Targets SillyTavern 1.19.0 or newer. This is an initial community extension and has not been runtime-tested on every SillyTavern fork or Android build. Other installed extensions may hook into SillyTavern's raw-generation pipeline.
+For an existing installation, replace the repository files with this version and reload SillyTavern. The manifest version is `0.2.0`.
